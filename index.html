@@ -975,6 +975,15 @@ body::after {
 .mute-btn:active{transform:scale(0.9);}
 .mute-btn.is-muted{border-color:rgba(201,169,110,0.15);opacity:0.6;}
 .mute-btn.is-muted:hover{opacity:1;}
+.voice-btn{
+  font-size:16px;
+  line-height:1;
+}
+.voice-btn.is-speaking{
+  border-color:var(--gold);
+  background:rgba(201,169,110,0.15);
+  box-shadow:0 0 10px rgba(201,169,110,0.3);
+}
 #start-mute-btn{position:absolute;top:16px;right:16px;z-index:20;}
 
 /* --- 点击进入遮罩 --- */
@@ -2553,6 +2562,7 @@ body::after {
     <button class="bottom-btn" onclick="loadGame()">读档</button>
     <button class="bottom-btn" onclick="showHelp()">指南</button>
     <button class="bottom-btn" onclick="showFeedback()">反馈</button>
+    <button class="mute-btn voice-btn" id="game-voice-btn" title="语音播报开关">🗣️</button>
     <button class="mute-btn" id="game-mute-btn" title="音效开关"><svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M3 9v6h4l5 5V4L7 9H3z"/><path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z" fill="currentColor"/><path d="M19 12c0 2.93-1.66 5.47-4.08 6.72l.84 1.44C19.07 18.5 21 15.5 21 12s-1.93-6.5-5.24-8.16l-.84 1.44C17.34 6.53 19 9.07 19 12z" fill="currentColor"/></svg></button>
   </div>
   <div id="autosave-indicator">已自动存档</div>
@@ -3279,6 +3289,168 @@ const SFX = {
     ns.connect(bp); bp.connect(ng); ng.connect(out);
     ns.start(t);
     this._pluck(this.P.E4, t + 0.05, 0.04, 0.6);
+  }
+};
+
+const Narrator = {
+  enabled: true,
+  speaking: false,
+  supported: false,
+  activated: false,
+  _voice: null,
+  _pendingText: '',
+  _warnedUnsupported: false,
+  _currentQueueToken: 0,
+
+  init() {
+    this.supported = typeof window !== 'undefined' &&
+      'speechSynthesis' in window &&
+      typeof window.SpeechSynthesisUtterance !== 'undefined';
+
+    const saved = localStorage.getItem('pivot_voice_enabled');
+    this.enabled = saved !== '0';
+
+    if (this.supported) {
+      this._pickVoice();
+      if (window.speechSynthesis.onvoiceschanged !== undefined) {
+        window.speechSynthesis.addEventListener('voiceschanged', () => this._pickVoice());
+      }
+      const unlock = () => {
+        this.activated = true;
+        if (this._pendingText) {
+          const text = this._pendingText;
+          this._pendingText = '';
+          this.speak(text);
+        }
+      };
+      document.addEventListener('pointerdown', unlock, {passive:true, once:true});
+      document.addEventListener('touchstart', unlock, {passive:true, once:true});
+      document.addEventListener('keydown', unlock, {once:true});
+    }
+
+    this._updateButton();
+  },
+
+  toggle() {
+    this.enabled = !this.enabled;
+    localStorage.setItem('pivot_voice_enabled', this.enabled ? '1' : '0');
+    if (!this.enabled) this.stop();
+    this._updateButton();
+  },
+
+  stop() {
+    if (this.supported) {
+      window.speechSynthesis.cancel();
+    }
+    this.speaking = false;
+    this._currentQueueToken++;
+    this._updateButton();
+  },
+
+  speak(text) {
+    const clean = this._cleanText(text);
+    if (!clean || !this.enabled) return;
+    if (!this.supported) {
+      this._warnUnsupportedOnce();
+      return;
+    }
+    if (!this.activated) {
+      this._pendingText = clean;
+      return;
+    }
+
+    this.stop();
+    const token = ++this._currentQueueToken;
+    const chunks = this._chunkText(clean, 70);
+    if (chunks.length === 0) return;
+    this.speaking = true;
+    this._updateButton();
+    this._speakChunks(chunks, token, 0);
+  },
+
+  speakCurrentEventDescription() {
+    const descEl = document.querySelector('#crisis-content .event-desc');
+    if (descEl) this.speak(descEl.textContent || '');
+  },
+
+  speakEventDetail() {
+    const panel = document.getElementById('ev-detail');
+    if (panel && panel.style.display !== 'none') this.speak(panel.textContent || '');
+  },
+
+  _speakChunks(chunks, token, idx) {
+    if (token !== this._currentQueueToken) return;
+    if (idx >= chunks.length) {
+      this.speaking = false;
+      this._updateButton();
+      return;
+    }
+    const u = new SpeechSynthesisUtterance(chunks[idx]);
+    u.lang = (this._voice && this._voice.lang) ? this._voice.lang : 'zh-CN';
+    u.rate = 1;
+    u.pitch = 1;
+    u.volume = 1;
+    if (this._voice) u.voice = this._voice;
+    u.onend = () => this._speakChunks(chunks, token, idx + 1);
+    u.onerror = () => {
+      this.speaking = false;
+      this._updateButton();
+    };
+    window.speechSynthesis.speak(u);
+  },
+
+  _pickVoice() {
+    if (!this.supported) return;
+    const voices = window.speechSynthesis.getVoices() || [];
+    this._voice = voices.find(v => /zh-CN/i.test(v.lang))
+      || voices.find(v => /^zh/i.test(v.lang))
+      || null;
+  },
+
+  _cleanText(text) {
+    return String(text || '')
+      .replace(/\s+/g, ' ')
+      .replace(/📜|💡|⚖️|🔮|🌍/g, '')
+      .trim();
+  },
+
+  _chunkText(text, maxLen) {
+    const parts = text.split(/[。！？!?；;：:\n]/).map(s => s.trim()).filter(Boolean);
+    const chunks = [];
+    parts.forEach(part => {
+      let rest = part;
+      while (rest.length > maxLen) {
+        chunks.push(rest.slice(0, maxLen));
+        rest = rest.slice(maxLen);
+      }
+      if (rest) chunks.push(rest);
+    });
+    return chunks;
+  },
+
+  _warnUnsupportedOnce() {
+    if (this._warnedUnsupported) return;
+    this._warnedUnsupported = true;
+    if (typeof addLog === 'function') addLog('🔇 当前浏览器不支持语音播报');
+  },
+
+  _updateButton() {
+    const btn = document.getElementById('game-voice-btn');
+    if (!btn) return;
+    btn.classList.toggle('is-muted', !this.enabled);
+    btn.classList.toggle('is-speaking', this.enabled && this.speaking);
+    if (!this.enabled) {
+      btn.textContent = '🔇';
+      btn.title = '语音已关闭';
+      return;
+    }
+    if (this.speaking) {
+      btn.textContent = '🔊';
+      btn.title = '语音播报中（点击关闭）';
+      return;
+    }
+    btn.textContent = '🗣️';
+    btn.title = '语音已开启（点击关闭）';
   }
 };
 
@@ -5759,9 +5931,11 @@ function toggleEventDetail() {
   if (panel.style.display === 'none') {
     panel.style.display = 'block';
     if (btn) btn.textContent = '📜 收起';
+    if (typeof Narrator !== 'undefined') Narrator.speakEventDetail();
   } else {
     panel.style.display = 'none';
     if (btn) btn.textContent = '📜 了解更多';
+    if (typeof Narrator !== 'undefined') Narrator.stop();
   }
 }
 
@@ -6566,6 +6740,8 @@ function executeAdvancePlay(era, eventIndex) {
 
 // Opening screen animation
 function initStartScreen() {
+  if (typeof Narrator !== 'undefined') Narrator.init();
+
   // Generate particles: 50 gold particles + 8 ember particles
   const particleContainer = document.getElementById('start-particles');
   if (particleContainer) {
@@ -6693,6 +6869,7 @@ function initStartScreen() {
 
   // Bind mute buttons
   document.querySelectorAll('.mute-btn').forEach(btn => {
+    if (btn.id === 'game-voice-btn') return;
     btn.addEventListener('click', (e) => {
       e.preventDefault();
       e.stopPropagation();
@@ -6706,6 +6883,16 @@ function initStartScreen() {
       }
     });
   });
+
+  const voiceBtn = document.getElementById('game-voice-btn');
+  if (voiceBtn) {
+    voiceBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      Narrator.toggle();
+      if (Narrator.enabled) Narrator.speakCurrentEventDescription();
+    });
+  }
 
   SFX._updateMuteButtons();
 }
@@ -7885,11 +8072,22 @@ showEvent = function() {
   if (ev && _triedChoices[ev.id]) {
     applyTriedChoiceIndicators();
   }
+  if (typeof Narrator !== 'undefined') {
+    Narrator.speakCurrentEventDescription();
+  }
+};
+
+// ========== Hook makeChoice: stop narration before result flow ==========
+const _narratorOrigMakeChoice = makeChoice;
+makeChoice = function(idx, evt) {
+  if (typeof Narrator !== 'undefined') Narrator.stop();
+  _narratorOrigMakeChoice(idx, evt);
 };
 
 // ========== Hook nextTurn: clear snapshot on advance ==========
 const _rewindOrigNextTurn = nextTurn;
 nextTurn = function() {
+  if (typeof Narrator !== 'undefined') Narrator.stop();
   _rewindSnapshot = null;
   _rewindChoiceOrder = null;
   _rewindOrigNextTurn();
